@@ -16,7 +16,14 @@
 # Port, bind, deployment mode and serveUi all come from the instance config.json,
 # so they are deliberately NOT set here.
 #
-# RUNS THE BUILT OUTPUT: after changing code, `pnpm build` before restarting.
+# The server runs from SOURCE via tsx, like dev.ps1 does. It cannot run from
+# server\dist: workspace packages export ./src/*.ts and only rewrite to dist via
+# publishConfig at publish time, so plain node resolves @paperclipai/db to its
+# TypeScript source and dies on its ./client.js import. tsx resolves those fine.
+#
+# The UI is different — it IS served as a built bundle from ui\dist, so a UI
+# change needs `pnpm build` (or at least the ui build) before a restart. Server
+# changes only need a restart.
 #
 # Usage:  .\live.ps1
 
@@ -35,8 +42,17 @@ if (-not (Test-Path $env:PAPERCLIP_CONFIG)) {
 
 Set-Location $PSScriptRoot
 
-if (-not (Test-Path 'cli\dist\index.js')) {
-    throw "No built CLI at cli\dist\index.js. Run: pnpm build"
+# Not cli\dist\index.js: the built CLI declares none of its runtime deps in
+# cli/package.json (zod, among others). Those exist only in the published
+# package, which build-npm.sh assembles with them installed, so from the repo it
+# dies with ERR_MODULE_NOT_FOUND.
+$tsx = 'node_modules\tsx\dist\cli.mjs'
+if (-not (Test-Path (Join-Path 'server' $tsx))) {
+    throw "No tsx in server\node_modules. Run: pnpm install"
+}
+# app.ts serves the UI from server/ui-dist (published) or ../../ui/dist (repo).
+if (-not (Test-Path 'ui\dist\index.html')) {
+    throw "No built UI at ui\dist\index.html. Run: pnpm build"
 }
 
 # The old npx board may still hold the port. Fail loudly with the PID rather than
@@ -48,6 +64,7 @@ if ($busy) {
 }
 
 Write-Host "live board -> http://127.0.0.1:3100  (data: $($env:PAPERCLIP_HOME))" -ForegroundColor Green
-Write-Host "running from this repo's build; 'pnpm build' after code changes" -ForegroundColor DarkGray
+Write-Host "server from source via tsx; UI from ui\dist ('pnpm build' after UI changes)" -ForegroundColor DarkGray
 
-node cli\dist\index.js run
+Set-Location (Join-Path $PSScriptRoot 'server')
+node $tsx src\index.ts
