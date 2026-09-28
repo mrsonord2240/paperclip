@@ -188,6 +188,7 @@ describe("codex remote execution", () => {
       | undefined;
     expect(call?.[2]).not.toContain("--skip-git-repo-check");
     expect(call?.[3].env.CODEX_HOME).toBe(`${managedRemoteWorkspace}/.paperclip-runtime/codex/home`);
+    expect(call?.[3].env.CODEX_SQLITE_HOME).toBe(`${managedRemoteWorkspace}/.paperclip-runtime/codex/home`);
     expect(call?.[3].env.PAPERCLIP_WORKSPACE_CWD).toBe(managedRemoteWorkspace);
     expect(call?.[3].env.PAPERCLIP_WORKSPACE_WORKTREE_PATH).toBeUndefined();
     expect(JSON.parse(call?.[3].env.PAPERCLIP_WORKSPACES_JSON ?? "[]")).toEqual([
@@ -546,6 +547,7 @@ describe("codex remote execution", () => {
       "-",
     ]);
     expect(call?.[3].env.CODEX_HOME).toBe(`${managedRemoteWorkspace}/.paperclip-runtime/codex/home`);
+    expect(call?.[3].env.CODEX_SQLITE_HOME).toBe(`${managedRemoteWorkspace}/.paperclip-runtime/codex/home`);
     expect(call?.[3].remoteExecution?.remoteCwd).toBe(managedRemoteWorkspace);
   });
 
@@ -615,6 +617,7 @@ describe("codex remote execution", () => {
     expect(call?.[3].env.PAPERCLIP_WORKSPACE_REALIZATION_MODE).toBe("in_place");
     expect(call?.[3].env.PAPERCLIP_WORKSPACE_AUTHORITATIVE_ROOT).toBe("/app");
     expect(call?.[3].env.CODEX_HOME).toBe("/app/.paperclip-runtime/codex/home");
+    expect(call?.[3].env.CODEX_SQLITE_HOME).toBe("/app/.paperclip-runtime/codex/home");
     expect(call?.[3].remoteExecution?.remoteCwd).toBe("/app");
   });
 });

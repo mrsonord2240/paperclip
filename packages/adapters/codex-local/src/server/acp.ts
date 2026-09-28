@@ -226,6 +226,7 @@ async function prepareCodexRemoteManagedHome(
   env.CODEX_HOME =
     stagedRuntime.assetDirs.home ??
     path.posix.join(stagedRuntime.runtimeRootDir ?? "", "home");
+  env.CODEX_SQLITE_HOME = env.CODEX_HOME;
 
   return {
     stagedRuntime,
