@@ -12,3 +12,5 @@
 # and it reports "Migrations: already applied" against the same database. Pin .sql
 # to LF so a local build agrees with the database the published build migrated.
 *.sql text eol=lf
+
+patches/*.patch whitespace=-space-before-tab

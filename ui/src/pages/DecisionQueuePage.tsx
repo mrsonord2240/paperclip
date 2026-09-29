@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Check, Loader2, Settings2, X } from "lucide-react";
 import type { Agent, AttentionItem } from "@paperclipai/shared";
@@ -12,18 +12,51 @@ import { useBreadcrumbs } from "../context/BreadcrumbContext";
 import { useToastActions } from "../context/ToastContext";
 import { useInboxDismissals } from "../hooks/useInboxBadge";
 import { queryKeys } from "../lib/queryKeys";
+import {
+  ATTENTION_AGING_DAYS,
+  attentionIsAging,
+  buildAttentionFilterOptions,
+  buildDeskShelves,
+  defaultAttentionFilterState,
+  filterAttentionItems,
+  groupAttentionItems,
+  loadAttentionFilters,
+  loadAttentionGroupBy,
+  loadAttentionSortOrder,
+  loadCollapsedAttentionGroupKeys,
+  resolveAttentionDateRange,
+  saveAttentionFilters,
+  saveAttentionGroupBy,
+  saveAttentionSortOrder,
+  saveCollapsedAttentionGroupKeys,
+  sortAttentionItems,
+  type AttentionDateRangeId,
+  type AttentionFilterState,
+  type AttentionGroup,
+  type AttentionGroupBy,
+  type AttentionSortOrder,
+} from "../lib/attention";
 import { cn } from "../lib/utils";
 import { PageSkeleton } from "../components/PageSkeleton";
 import { AttentionQueueRow } from "../components/AttentionQueueRow";
+import { DecisionsToolbar } from "../components/DecisionsToolbar";
+import { Curtain, AgingItemRow } from "../components/DecisionShelf";
 import { DecisionQueueRail } from "../components/DecisionQueueRail";
+import { DecisionDateChips, type AttentionCustomRange } from "../components/DecisionDateChips";
+import { IssueGroupHeader } from "../components/IssueGroupHeader";
 import { Button } from "../components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "../components/ui/popover";
+
 /**
- * Queue page (PAP-16032 §4.1 / wireframe screen 2). A homogeneous list of one
- * queue's pending decisions with per-item resolution, exclusion (with an
- * optional reason), and the queue's seed-rules card with an enable/disable
- * toggle. The list reuses the desk's card so a decision looks and resolves the
- * same wherever it is surfaced.
+ * Queue page. A single queue's pending
+ * decisions with per-item resolution, exclusion (with an optional reason), and
+ * the queue's seed-rules card with an enable/disable toggle.
+ *
+ * The queue exposes the same toolbar the desk does — filter,
+ * group-by, sort, the arrival timeline groupings, the date-range chips, and the
+ * aging shelf — sharing the desk's `DecisionsToolbar`, grouping helpers, and
+ * shelf components so a decision looks, groups, and resolves the same wherever it
+ * is surfaced.
  */
 export function DecisionQueuePage() {
   const { selectedCompanyId } = useCompany();
@@ -34,6 +67,22 @@ export function DecisionQueuePage() {
   const queueKey = params.key ?? "";
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const { dismiss, snooze } = useInboxDismissals(selectedCompanyId);
+
+  // Toolbar preferences (persisted to localStorage, shared with the desk).
+  const [groupBy, setGroupBy] = useState<AttentionGroupBy>(() => loadAttentionGroupBy());
+  const [sortOrder, setSortOrder] = useState<AttentionSortOrder>(() => loadAttentionSortOrder());
+  const [filters, setFilters] = useState<AttentionFilterState>(() => defaultAttentionFilterState);
+  const [collapsedGroupKeys, setCollapsedGroupKeys] = useState<Set<string>>(() => new Set());
+  const [agingOpen, setAgingOpen] = useState(false);
+
+  // Date-range chips (§4.2) — resolve to server-side activity bounds.
+  const [dateRange, setDateRange] = useState<AttentionDateRangeId>("all");
+  const [customRange, setCustomRange] = useState<AttentionCustomRange>({ from: null, to: null });
+
+  const activityBounds = useMemo(
+    () => resolveAttentionDateRange(dateRange, Date.now(), customRange),
+    [dateRange, customRange],
+  );
 
   const { data: queues } = useQuery({
     queryKey: queryKeys.decisionQueues.list(selectedCompanyId!),
@@ -47,8 +96,14 @@ export function DecisionQueuePage() {
     isLoading,
     error,
   } = useQuery({
-    queryKey: [...queryKeys.attention(selectedCompanyId!), "queue", queueKey],
-    queryFn: () => attentionApi.list(selectedCompanyId!, { queue: queueKey, all: true }),
+    queryKey: [
+      ...queryKeys.attention(selectedCompanyId!),
+      "queue",
+      queueKey,
+      activityBounds.activitySince ?? null,
+      activityBounds.activityUntil ?? null,
+    ],
+    queryFn: () => attentionApi.list(selectedCompanyId!, { queue: queueKey, all: true, ...activityBounds }),
     enabled: !!selectedCompanyId && !!queueKey,
     refetchOnWindowFocus: true,
   });
@@ -74,11 +129,71 @@ export function DecisionQueuePage() {
     setBreadcrumbs([{ label: "Decisions", href: "/decisions" }, { label: queue?.title ?? queueKey }]);
   }, [setBreadcrumbs, queue?.title, queueKey]);
 
-  const items = useMemo(
+  // Re-hydrate per-company preferences when the company changes.
+  useEffect(() => {
+    setFilters(loadAttentionFilters(selectedCompanyId));
+    setCollapsedGroupKeys(loadCollapsedAttentionGroupKeys(selectedCompanyId));
+  }, [selectedCompanyId]);
+
+  // The server's clock at feed time — used for the arrival/decide-by shelves and
+  // the aging idle labels so they match the desk exactly.
+  const now = useMemo(
+    () => (feed?.generatedAt ? new Date(feed.generatedAt).getTime() : Date.now()),
+    [feed?.generatedAt],
+  );
+
+  const activeItems = useMemo(
     () => (feed?.items ?? []).filter((item) => !(item.dismissal?.isActive ?? false)),
     [feed],
   );
 
+  // Aging shelf (§4.4): items the server flags as idle past retention leave the
+  // live list for their own curtain, mirroring the desk.
+  const agingItems = useMemo(() => activeItems.filter(attentionIsAging), [activeItems]);
+  const listItems = useMemo(() => activeItems.filter((item) => !attentionIsAging(item)), [activeItems]);
+
+  const filterOptions = useMemo(() => buildAttentionFilterOptions(listItems), [listItems]);
+
+  // Filter → sort → group, matching the desk. In the default (ungrouped) view the
+  // list groups by arrival ("New today" / "Earlier", plus a "Decide now" shelf
+  // when something carries an explicit due decide-by); any explicit group-by keeps
+  // the Inbox-style activity grouping.
+  const groups = useMemo<AttentionGroup[]>(() => {
+    const filtered = filterAttentionItems(listItems, filters);
+    if (groupBy === "none") {
+      return buildDeskShelves(filtered, now);
+    }
+    const sorted = sortAttentionItems(filtered, sortOrder);
+    return groupAttentionItems(sorted, groupBy);
+  }, [listItems, filters, sortOrder, groupBy, now]);
+
+  const visibleCount = useMemo(() => groups.reduce((sum, group) => sum + group.items.length, 0), [groups]);
+
+  const updateGroupBy = (next: AttentionGroupBy) => {
+    setGroupBy(next);
+    saveAttentionGroupBy(next);
+  };
+  const updateSortOrder = (next: AttentionSortOrder) => {
+    setSortOrder(next);
+    saveAttentionSortOrder(next);
+  };
+  const updateFilters = (next: AttentionFilterState) => {
+    setFilters(next);
+    saveAttentionFilters(selectedCompanyId, next);
+  };
+  const toggleGroupCollapse = (key: string) => {
+    setCollapsedGroupKeys((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      saveCollapsedAttentionGroupKeys(selectedCompanyId, next);
+      return next;
+    });
+  };
+
+  const handleToggleExpand = useCallback((item: AttentionItem) => {
+    setExpandedId((prev) => (prev === item.id ? null : item.id));
+  }, []);
   const invalidate = () => {
     queryClient.invalidateQueries({ queryKey: queryKeys.attention(selectedCompanyId!) });
     queryClient.invalidateQueries({ queryKey: queryKeys.decisionQueues.list(selectedCompanyId!) });
@@ -97,11 +212,13 @@ export function DecisionQueuePage() {
   });
 
   if (!selectedCompanyId) {
-    return <p className="text-sm text-muted-foreground">Select a company first.</p>;
+    return <p className="text-sm text-muted-foreground">Select an organization first.</p>;
   }
   if (isLoading) {
     return <PageSkeleton variant="approvals" />;
   }
+
+  const isEmpty = activeItems.length === 0;
 
   return (
     <div className="max-w-3xl space-y-4">
@@ -110,9 +227,29 @@ export function DecisionQueuePage() {
           <h1 className="text-xl font-bold">{queue?.title ?? queueKey}</h1>
           {queue?.description && <p className="mt-0.5 text-sm text-muted-foreground">{queue.description}</p>}
         </div>
+        <DecisionsToolbar
+          visibleCount={visibleCount}
+          filterOptions={filterOptions}
+          filters={filters}
+          onFiltersChange={updateFilters}
+          groupBy={groupBy}
+          onGroupByChange={updateGroupBy}
+          sortOrder={sortOrder}
+          onSortOrderChange={updateSortOrder}
+        />
       </div>
 
-      <DecisionQueueRail companyId={selectedCompanyId} activeQueueKey={queueKey} />
+      <div className="space-y-2">
+        <DecisionQueueRail companyId={selectedCompanyId} activeQueueKey={queueKey} />
+        <DecisionDateChips
+          value={dateRange}
+          custom={customRange}
+          onChange={(value, custom) => {
+            setDateRange(value);
+            setCustomRange(custom);
+          }}
+        />
+      </div>
 
       {queue && queue.seedRules.length > 0 && (
         <SeedRulesCard
@@ -125,7 +262,7 @@ export function DecisionQueuePage() {
 
       {error && <p className="text-sm text-destructive">{(error as Error).message}</p>}
 
-      {items.length === 0 ? (
+      {isEmpty ? (
         <div className="rounded-xl border border-dashed border-border py-14 text-center">
           <p className="text-sm font-medium text-foreground">This queue is empty.</p>
           <p className="mt-1 text-xs text-muted-foreground">
@@ -134,28 +271,92 @@ export function DecisionQueuePage() {
         </div>
       ) : (
         <div className="space-y-4">
-          {items.map((item) => (
-            <QueueItemRow
-              key={item.id}
-              item={item}
-              companyId={selectedCompanyId}
-              queueKey={queueKey}
-              agentMap={agentMap}
-              agents={agents}
-              currentUserId={currentUserId}
-              expanded={expandedId === item.id}
-              onToggleExpand={(next) => setExpandedId((prev) => (prev === next.id ? null : next.id))}
-              onDismiss={(next) => dismiss(next.dismissalKey)}
-              onSnooze={(next, until) => snooze(next.dismissalKey, until)}
-              onExcluded={invalidate}
-            />
-          ))}
+          {visibleCount === 0 ? (
+            <div className="rounded-xl border border-dashed border-border py-10 text-center">
+              <p className="text-sm font-medium text-foreground">No decisions match your filters.</p>
+              <p className="mt-1 text-xs text-muted-foreground">Adjust or clear the filters to see the rest.</p>
+            </div>
+          ) : (
+            groups.map((group) => {
+              const groupLabel = group.label;
+              const collapsed = groupLabel !== null && collapsedGroupKeys.has(group.key);
+              return (
+                <section key={group.key} className="space-y-2">
+                  {groupLabel !== null && (
+                    <IssueGroupHeader
+                      label={groupLabel}
+                      collapsible
+                      collapsed={collapsed}
+                      onToggle={() => toggleGroupCollapse(group.key)}
+                      trailing={
+                        <span className="text-xs tabular-nums text-muted-foreground">{group.items.length}</span>
+                      }
+                    />
+                  )}
+                  {!collapsed && (
+                    <div className="space-y-4">
+                      {group.items.map((item) => (
+                        <QueueItemRow
+                          key={item.id}
+                          item={item}
+                          companyId={selectedCompanyId}
+                          queueKey={queueKey}
+                          agentMap={agentMap}
+                          agents={agents}
+                          currentUserId={currentUserId}
+                          expanded={expandedId === item.id}
+                          onToggleExpand={handleToggleExpand}
+                          onDismiss={(next) => dismiss(next.dismissalKey)}
+                          onSnooze={(next, until) => snooze(next.dismissalKey, until)}
+                          onExcluded={invalidate}
+                        />
+                      ))}
+                    </div>
+                  )}
+                </section>
+              );
+            })
+          )}
+
+          {agingItems.length > 0 && (
+            <Curtain
+              label="Aging"
+              count={agingItems.length}
+              open={agingOpen}
+              onToggle={() => setAgingOpen((prev) => !prev)}
+            >
+              <p className="text-xs text-muted-foreground">
+                Idle past {ATTENTION_AGING_DAYS} days — kept off the queue. Keep any you still want surfaced.
+              </p>
+              {agingItems.map((item) => (
+                <AgingItemRow
+                  key={item.id}
+                  item={item}
+                  companyId={selectedCompanyId}
+                  now={now}
+                  agentMap={agentMap}
+                  agents={agents}
+                  currentUserId={currentUserId}
+                  expanded={expandedId === item.id}
+                  onToggleExpand={handleToggleExpand}
+                  onDismiss={(next) => dismiss(next.dismissalKey)}
+                  onSnooze={(next, until) => snooze(next.dismissalKey, until)}
+                />
+              ))}
+            </Curtain>
+          )}
         </div>
       )}
     </div>
   );
 }
 
+/**
+ * Auto-seed card: explains in place what seeding does — the queue's seed rules
+ * (from `DECISION_QUEUE_SEEDS`) that pull matching decisions in automatically —
+ * and what the toggle changes. Disabling stops only the automatic adds; anything
+ * already here stays, and manual adds keep working.
+ */
 function SeedRulesCard({
   enabled,
   rules,
@@ -172,9 +373,14 @@ function SeedRulesCard({
       <div className="flex items-start justify-between gap-3">
         <div className="flex min-w-0 items-start gap-2">
           <Settings2 className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
-          <div className="min-w-0">
-            <p className="text-sm font-medium text-foreground">Auto-seeding {enabled ? "on" : "off"}</p>
-            <ul className="mt-1 space-y-0.5">
+          <div className="min-w-0 space-y-1">
+            <p className="text-sm font-medium text-foreground">Auto-seeding is {enabled ? "on" : "off"}</p>
+            <p className="text-xs text-muted-foreground">
+              {enabled
+                ? "This queue fills itself automatically. Decisions are added the moment they match any of its rules:"
+                : "Automatic adds are paused. These rules would add decisions to the queue when on:"}
+            </p>
+            <ul className="mt-0.5 space-y-0.5">
               {rules.map((rule) => (
                 <li key={rule} className="flex items-start gap-1.5 text-xs text-muted-foreground">
                   <Check className="mt-0.5 h-3 w-3 shrink-0" />
@@ -182,6 +388,11 @@ function SeedRulesCard({
                 </li>
               ))}
             </ul>
+            <p className="text-(length:--text-nano) text-muted-foreground">
+              {enabled
+                ? "Turning it off stops new automatic adds only — decisions already here stay, and you can still add or remove decisions by hand."
+                : "Adding or removing decisions by hand still works while automatic seeding is off."}
+            </p>
           </div>
         </div>
         <Button type="button" variant="outline" size="xs" className="h-7 shrink-0" disabled={pending} onClick={onToggle}>

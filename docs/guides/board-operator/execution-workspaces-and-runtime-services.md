@@ -65,6 +65,36 @@ Heartbeat resolves a workspace for the run (code location and session continuity
 4. Heartbeat passes the resolved code workspace to the agent run.
 5. Heartbeat calls `ensureRuntimeServicesForRun` to start the workspace's `running`-desired runtime services, running the lazy runtime provision command first if one is configured and has not yet run (see "Lazy runtime provisioning" below).
 
+## Browser-reachable origins for OAuth QA
+
+A managed service that runs Paperclip itself needs one canonical origin for Better Auth and tool OAuth callbacks. Paperclip resolves that origin in this order:
+
+1. Explicit service/runtime configuration such as `PAPERCLIP_PUBLIC_URL` or `BETTER_AUTH_URL`.
+2. An explicit instance auth public base URL.
+3. The managed service's rendered `expose.urlTemplate`, injected as a low-priority runtime fallback.
+
+The exposed URL must describe the route the operator's browser actually uses. Non-loopback callbacks require HTTPS. Loopback HTTP such as `http://127.0.0.1:45439` is supported for local browser QA. A non-loopback hostname rendered from workspace data must remain inside the stable domain suffix configured by `expose.urlTemplate`; branch names cannot replace that domain. Bind addresses, internal-only single-label names such as `paperclip-dev`, reserved/non-resolving names, and non-loopback HTTP origins fail service startup with configuration guidance instead of silently producing an unusable redirect URI.
+
+Keep readiness and browser exposure separate when a proxy or tailnet route fronts the process:
+
+```json
+{
+  "name": "paperclip-dev",
+  "command": "pnpm dev --bind lan",
+  "port": { "type": "auto" },
+  "readiness": {
+    "type": "http",
+    "urlTemplate": "http://127.0.0.1:{{port}}"
+  },
+  "expose": {
+    "type": "url",
+    "urlTemplate": "https://{{workspace.branchName}}.dev.example.com"
+  }
+}
+```
+
+Use a distinct reachable hostname (or other distinct origin) per isolated worktree. Do not point multiple worktree runtimes at the parent instance's origin. After startup, open the service URL in the same browser session used for QA and verify `GET /api/tools/oauth/client-metadata`; its `redirect_uris` entry should use that service origin and `/api/tools/oauth/callback`.
+
 ## Lazy runtime provisioning
 
 Some workspaces need heavy one-time setup — seeding a database, warming caches — before their runtime services can start. That work can be deferred to the first runtime-service start instead of running eagerly during workspace preparation.
@@ -76,6 +106,32 @@ Some workspaces need heavy one-time setup — seeding a database, warming caches
   - **Provisioned at &lt;time&gt;** — the command completed successfully.
   - **Provisioning failed** — the command failed; the workspace detail links to the runtime logs for the failing operation.
 - While the command runs, the runtime service shows a **Provisioning…** state before it transitions to starting/running.
+
+## Private repositories and repo-only project workspaces
+
+A project workspace can be **repo-only**: a `Repo URL` with no local path. The server then
+materializes a managed checkout on demand (`git clone` into a managed directory) and, for
+isolated `git_worktree` runs, refreshes the base ref (`git fetch`) before preparing each
+worktree. Both operations run on the server, outside any agent process — so agent-scoped
+credential env bindings do not apply to them.
+
+For **private GitHub repositories**, store a token as a **company secret** named one of
+`GITHUB_TOKEN`, `GH_TOKEN`, or `PAPERCLIP_GITHUB_TOKEN` (checked in that order; Settings →
+Secrets). The server resolves it per run and authenticates managed clones and base-ref
+fetches with it. Details and caveats:
+
+- Scope: only `https://github.com/...` repo URLs are authenticated this way. SSH URLs, GitHub
+  Enterprise hosts, and other providers keep ambient behavior (system git config/credential
+  helpers on the server host). URLs that embed their own credentials are never overridden.
+- Fallback: with no matching company secret, the server falls back to a `GITHUB_TOKEN` or
+  `GH_TOKEN` variable in the **server process environment** (useful for self-hosted single-tenant
+  deployments), then to unauthenticated access — public repos keep working with no setup.
+- The token never appears in command lines, URLs, or on disk; it is passed to git through an
+  ephemeral credential helper. Each resolution is recorded as a secret access event.
+- This is separate from the **agent push credential**: agents pushing branches/PRs still need
+  `GH_TOKEN`/`GITHUB_TOKEN` bound at agent or project scope (see
+  [deploy/secrets](../../deploy/secrets.md)) so the token reaches the agent process env. The
+  same company secret can back both uses via a binding.
 
 ## Cross-run persistence (no-remote-git contract)
 

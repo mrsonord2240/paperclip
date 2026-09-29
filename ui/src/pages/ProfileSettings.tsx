@@ -13,6 +13,8 @@ import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { ToggleSwitch } from "@/components/ui/toggle-switch";
+import { useUserPreferences } from "../hooks/useUserPreferences";
 
 function deriveInitials(name: string) {
   const parts = name.trim().split(/\s+/).filter(Boolean);
@@ -24,6 +26,7 @@ export function ProfileSettings() {
   const { setBreadcrumbs } = useBreadcrumbs();
   const { selectedCompanyId, selectedCompany } = useCompany();
   const queryClient = useQueryClient();
+  const preferencesQuery = useUserPreferences();
   const avatarInputId = useId();
   const avatarInputRef = useRef<HTMLInputElement | null>(null);
   const [name, setName] = useState("");
@@ -34,11 +37,17 @@ export function ProfileSettings() {
     queryFn: () => authApi.getSession(),
     retry: false,
   });
+  const updatePreferencesMutation = useMutation({
+    mutationFn: authApi.updatePreferences,
+    onMutate: () => sessionQuery.data?.user.id ?? null,
+    onSuccess: (preferences, _input, userId) => {
+      queryClient.setQueryData(queryKeys.auth.preferences(userId), preferences);
+    },
+  });
 
   useEffect(() => {
     setBreadcrumbs([
       { label: "Settings", href: "/company/settings" },
-      { label: "Instance settings", href: "/company/settings/instance/general" },
       { label: "Profile" },
     ]);
   }, [setBreadcrumbs]);
@@ -88,7 +97,7 @@ export function ProfileSettings() {
   const uploadAvatarMutation = useMutation({
     mutationFn: async (file: File) => {
       if (!selectedCompanyId) {
-        throw new Error("Select a company before uploading a profile avatar.");
+        throw new Error("Select an organization before uploading a profile avatar.");
       }
 
       const asset = await assetsApi.uploadImage(
@@ -138,10 +147,10 @@ export function ProfileSettings() {
   const isSavingProfile = updateMutation.isPending || uploadAvatarMutation.isPending || removeAvatarMutation.isPending;
   const uploadHint = selectedCompany
     ? `Stored in Paperclip file storage for ${selectedCompany.name}.`
-    : "Select a company to upload an avatar into Paperclip storage.";
+    : "Select an organization to upload an avatar into Paperclip storage.";
 
   return (
-    <div className="max-w-4xl space-y-6">
+    <div className="max-w-6xl space-y-6">
       <div className="space-y-2">
         <div className="flex items-center gap-2">
           <UserRoundPen className="h-5 w-5 text-muted-foreground" />
@@ -271,9 +280,32 @@ export function ProfileSettings() {
           </div>
         </form>
 
-        <Card className="rounded-(--rad-28) border-border/70 p-6">
-          <InboxAgentPolicyControl companyId={selectedCompanyId} />
-        </Card>
+        <section>
+          <div className="flex items-start justify-between gap-4">
+            <div className="space-y-1.5">
+              <h2 className="text-sm font-semibold">Keyboard shortcuts</h2>
+              <p className="max-w-2xl text-sm text-muted-foreground">
+                Enable app keyboard shortcuts, including inbox navigation and global shortcuts like creating tasks or
+                toggling panels. This applies only to your account, across all organizations and devices. Off by default.
+              </p>
+            </div>
+            <ToggleSwitch
+              checked={preferencesQuery.data?.keyboardShortcuts === true}
+              onCheckedChange={(keyboardShortcuts) => {
+                if (selectedCompanyId && sessionQuery.data?.user.id) updatePreferencesMutation.mutate({ companyId: selectedCompanyId, keyboardShortcuts, expectedUserId: sessionQuery.data.user.id });
+              }}
+              disabled={!selectedCompanyId || !preferencesQuery.data || preferencesQuery.isError || updatePreferencesMutation.isPending}
+              aria-label="Toggle keyboard shortcuts"
+            />
+          </div>
+          {preferencesQuery.error || updatePreferencesMutation.error ? (
+            <p role="alert" className="text-sm text-destructive">
+              {(updatePreferencesMutation.error ?? preferencesQuery.error)?.message}
+            </p>
+          ) : null}
+        </section>
+
+        <InboxAgentPolicyControl companyId={selectedCompanyId} />
       </section>
     </div>
   );

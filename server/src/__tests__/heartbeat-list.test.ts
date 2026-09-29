@@ -264,6 +264,15 @@ describeEmbeddedPostgres("heartbeat list", () => {
         summary: "completed",
         stdout: oversizedStdout,
         nestedHuge: { payload: oversizedNestedPayload },
+        instructionSave: {
+          state: "unavailable", contract: "agent_files", entryFile: "AGENTS.md",
+          errorCode: "AGENT_FILES_LIMIT_EXCEEDED",
+          storageWarning: "Agent storage is full. Runs can continue.".repeat(50),
+          privateSyncMetadata: oversizedNestedPayload,
+        },
+        workspaceRestoreFailure: "restore_unsafe_archive",
+        finalResponseRecorded: true,
+        executionBeforeRestore: { errorCode: "model_error", exitCode: 2, timedOut: false },
       },
     });
 
@@ -275,10 +284,19 @@ describeEmbeddedPostgres("heartbeat list", () => {
       truncated: true,
       truncationReason: "oversized_result_json",
       stdoutTruncated: true,
+      instructionSave: {
+        state: "unavailable", contract: "agent_files", entryFile: "AGENTS.md",
+        errorCode: "AGENT_FILES_LIMIT_EXCEEDED",
+        storageWarning: "Agent storage is full. Runs can continue.".repeat(50).slice(0, 1024),
+      },
+      workspaceRestoreFailure: "restore_unsafe_archive",
+      finalResponseRecorded: true,
+      executionBeforeRestore: { errorCode: "model_error", exitCode: 2, timedOut: false },
     });
     expect(typeof result?.stdout).toBe("string");
     expect((result?.stdout as string).length).toBeLessThan(oversizedStdout.length);
     expect(result).not.toHaveProperty("nestedHuge");
+    expect(result?.instructionSave).not.toHaveProperty("privateSyncMetadata");
   });
 });
 
