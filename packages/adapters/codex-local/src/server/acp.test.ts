@@ -789,6 +789,34 @@ describe("codex_local ACP lane", () => {
     });
   });
 
+  it("preserves an operator-configured CODEX_SQLITE_HOME", async () => {
+    const root = await makeTempRoot("paperclip-codex-acp-sqlite-home-");
+    const meta: AdapterInvocationMeta[] = [];
+    const execute = createCodexAcpExecutor({
+      createRuntime: (options: FakeRuntimeOptions) => new FakeRuntime(options) as never,
+    });
+
+    const result = await execute(buildContext(root, {
+      config: {
+        engine: "acp",
+        cwd: root,
+        stateDir: path.join(root, "state"),
+        env: {
+          CODEX_HOME: path.join(root, "codex-home"),
+          CODEX_SQLITE_HOME: path.join(root, "sqlite-home"),
+        },
+        promptTemplate: "Do the assigned work.",
+      },
+      onMeta: async (payload: AdapterInvocationMeta) => {
+        meta.push(payload);
+      },
+    }));
+
+    expect(result.exitCode).toBe(0);
+    expect(meta[0]?.env?.CODEX_HOME).toBe(path.join(root, "codex-home"));
+    expect(meta[0]?.env?.CODEX_SQLITE_HOME).toBe(path.join(root, "sqlite-home"));
+  });
+
   it("sends assignment-owned markdown and ordered distinct wake comments at the ACP boundary", async () => {
     const root = await makeTempRoot("paperclip-codex-acp-context-owner-");
     const runtimes: FakeRuntime[] = [];
