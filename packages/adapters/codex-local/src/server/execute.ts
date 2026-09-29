@@ -949,7 +949,11 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     // Without this, every codex_local agent on a host silently shares one
     // SQLite state home instead of its own managed one, and concurrent agents
     // collide with "failed to initialize sqlite state runtime". See #11398.
-    env.CODEX_SQLITE_HOME = remoteCodexHome ?? effectiveCodexHome;
+    // An operator-configured CODEX_SQLITE_HOME wins; CODEX_HOME is the default.
+    env.CODEX_SQLITE_HOME =
+      typeof envConfig.CODEX_SQLITE_HOME === "string" && envConfig.CODEX_SQLITE_HOME.trim().length > 0
+        ? envConfig.CODEX_SQLITE_HOME.trim()
+        : env.CODEX_HOME;
     if (authToken) {
       env.PAPERCLIP_API_KEY = authToken;
     }

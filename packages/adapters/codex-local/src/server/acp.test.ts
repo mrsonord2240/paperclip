@@ -740,6 +740,34 @@ describe("codex_local ACP lane", () => {
     });
   });
 
+  it("preserves an operator-configured CODEX_SQLITE_HOME", async () => {
+    const root = await makeTempRoot("paperclip-codex-acp-sqlite-home-");
+    const meta: AdapterInvocationMeta[] = [];
+    const execute = createCodexAcpExecutor({
+      createRuntime: (options: FakeRuntimeOptions) => new FakeRuntime(options) as never,
+    });
+
+    const result = await execute(buildContext(root, {
+      config: {
+        engine: "acp",
+        cwd: root,
+        stateDir: path.join(root, "state"),
+        env: {
+          CODEX_HOME: path.join(root, "codex-home"),
+          CODEX_SQLITE_HOME: path.join(root, "sqlite-home"),
+        },
+        promptTemplate: "Do the assigned work.",
+      },
+      onMeta: async (payload: AdapterInvocationMeta) => {
+        meta.push(payload);
+      },
+    }));
+
+    expect(result.exitCode).toBe(0);
+    expect(meta[0]?.env?.CODEX_HOME).toBe(path.join(root, "codex-home"));
+    expect(meta[0]?.env?.CODEX_SQLITE_HOME).toBe(path.join(root, "sqlite-home"));
+  });
+
   it("creates the ACP session on the in-sandbox workspace cwd for runner-backed remote runs", async () => {
     const root = await makeTempRoot("paperclip-codex-acp-remote-cwd-");
     const localCwd = path.join(root, "worktree");
