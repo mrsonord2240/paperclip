@@ -780,6 +780,7 @@ describe("codex_local ACP lane", () => {
     expect(runtimes[0]?.setConfigInputs).toEqual([]);
     expect(meta[0]?.commandNotes?.join("\n")).toContain("Prepared ACPX Codex skill home");
     expect(meta[0]?.env?.CODEX_HOME).toBe(path.join(root, "codex-home"));
+    expect(meta[0]?.env?.CODEX_SQLITE_HOME).toBe(path.join(root, "codex-home"));
     expect(JSON.parse(String(meta[0]?.env?.CODEX_CONFIG))).toEqual({
       model: "gpt-5.5",
       model_reasoning_effort: "high",
@@ -969,6 +970,7 @@ describe("codex_local ACP lane", () => {
     expect(remappedCodexHome).not.toBe(sourceHome);
     expect(remappedCodexHome).not.toBe(sharedHostHome);
     expect(remappedCodexHome).toContain(".paperclip-runtime");
+    expect(meta[0]?.env?.CODEX_SQLITE_HOME).toBe(remappedCodexHome);
     // Seeded: the credential materialized into the in-sandbox home (the local
     // runner uses the host FS, so the in-sandbox path is a real host path).
     await expect(fs.readFile(path.join(remappedCodexHome, "auth.json"), "utf8")).resolves.toContain(

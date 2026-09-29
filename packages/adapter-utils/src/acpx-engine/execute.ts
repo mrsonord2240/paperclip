@@ -1361,6 +1361,8 @@ async function prepareCodexSkillRuntime(input: {
   await writeManagedCodexSkillsManifest(skillsHome, selectedSkills.map((entry) => entry.runtimeName));
 
   input.env.CODEX_HOME = effectiveCodexHome;
+    // Codex keeps its runtime SQLite state under CODEX_SQLITE_HOME, not CODEX_HOME.
+  input.env.CODEX_SQLITE_HOME = effectiveCodexHome;
 
   return {
     identity: {
