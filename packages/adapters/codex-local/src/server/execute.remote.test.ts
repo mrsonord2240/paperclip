@@ -570,7 +570,11 @@ describe("codex remote execution", () => {
         adapterConfig: {},
       },
       runtime: { sessionId: null, sessionParams: null, sessionDisplayId: null, taskKey: null },
-      config: { command: "codex", env: { CODEX_HOME: codexHomeDir } },
+      config: {
+        command: "codex",
+        // A host SQLite path does not exist remotely; the staged home must win.
+        env: { CODEX_HOME: codexHomeDir, CODEX_SQLITE_HOME: path.join(rootDir, "host-sqlite") },
+      },
       context: {
         paperclipWorkspace: {
           cwd: workspaceDir,

@@ -1026,7 +1026,7 @@ async function prepareCodexSkillRuntime(input: {
   // An operator-configured value wins; the Codex home is only the default.
   input.env.CODEX_SQLITE_HOME =
     typeof envConfig.CODEX_SQLITE_HOME === "string" && envConfig.CODEX_SQLITE_HOME.trim().length > 0
-      ? envConfig.CODEX_SQLITE_HOME.trim()
+      ? path.resolve(envConfig.CODEX_SQLITE_HOME.trim())
       : effectiveCodexHome;
 
   return {
