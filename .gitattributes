@@ -1,1 +1,16 @@
+# Drizzle decides which migrations are already applied by hashing the CONTENTS of
+# each .sql file. With core.autocrlf=true a Windows checkout gets CRLF, which
+# changes every one of those hashes — so a server run from a Windows working tree
+# looks at a fully-migrated database, matches almost nothing, and tries to re-apply
+# the entire history onto existing tables:
+#
+#   WARN  ... had drifted migration history; repaired migration journal entries
+#   INFO  Applying 193 pending migrations
+#   ERROR relation "agent_runtime_state" already exists
+#
+# The published npm package is packed on Linux and ships LF, so its hashes match
+# and it reports "Migrations: already applied" against the same database. Pin .sql
+# to LF so a local build agrees with the database the published build migrated.
+*.sql text eol=lf
+
 patches/*.patch whitespace=-space-before-tab
