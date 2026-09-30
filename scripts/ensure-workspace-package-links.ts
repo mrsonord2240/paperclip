@@ -4,6 +4,13 @@ import { existsSync, readdirSync, readFileSync, realpathSync } from "node:fs";
 import path from "node:path";
 import { repoRoot } from "./dev-service-profile.ts";
 
+// Windows refuses a directory symlink unless the process holds
+// SeCreateSymbolicLinkPrivilege (Administrator, or Developer Mode enabled), so
+// this preflight fails with EPERM on an ordinary user account. A junction needs
+// no privilege and resolves identically for module lookup. Junctions only accept
+// an ABSOLUTE target, which `expectedPath` already is (it is path.resolve'd).
+const linkKind = process.platform === "win32" ? "junction" : "dir";
+
 type WorkspaceLinkMismatch = {
   workspaceDir: string;
   packageName: string;
@@ -101,7 +108,7 @@ async function ensureWorkspaceLinksCurrent(workspaceDir: string) {
     const linkPath = path.join(repoRoot, mismatch.workspaceDir, "node_modules", ...mismatch.packageName.split("/"));
     await fs.mkdir(path.dirname(linkPath), { recursive: true });
     await fs.rm(linkPath, { recursive: true, force: true });
-    await fs.symlink(mismatch.expectedPath, linkPath);
+    await fs.symlink(mismatch.expectedPath, linkPath, linkKind);
   }
 
   const remainingMismatches = findWorkspaceLinkMismatches(workspaceDir);
