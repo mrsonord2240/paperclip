@@ -81,9 +81,19 @@ test("linkSdkInto replaces a symlink that points somewhere else", () => {
   const pkg = makePackage(join(workDir, "stale-link"));
   const scopeDir = join(pkg, "node_modules", "@paperclipai");
   mkdirSync(scopeDir, { recursive: true });
-  symlinkSync("../somewhere-else", join(scopeDir, "plugin-sdk"), "dir");
+  // Match the link shape linkSdkInto itself uses: Windows cannot create a
+  // directory symlink without SeCreateSymbolicLinkPrivilege, and a junction
+  // needs an absolute target that already exists.
+  const strayDir = join(pkg, "node_modules", "somewhere-else");
+  mkdirSync(strayDir, { recursive: true });
+  if (process.platform === "win32") {
+    symlinkSync(strayDir, join(scopeDir, "plugin-sdk"), "junction");
+  } else {
+    symlinkSync("../somewhere-else", join(scopeDir, "plugin-sdk"), "dir");
+  }
 
   assert.equal(linkSdkInto(pkg), true);
   assert.notEqual(readlinkSync(join(scopeDir, "plugin-sdk")), "../somewhere-else");
+  assert.notEqual(readlinkSync(join(scopeDir, "plugin-sdk")), strayDir);
   assert.ok(existsSync(scopeDir));
 });
