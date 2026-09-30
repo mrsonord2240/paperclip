@@ -5362,7 +5362,7 @@ async function listSuccessfulRunHandoffMapForIssues(
     : hydrateSuccessfulRunHandoffLiveness(dbOrTx, companyId, states);
 }
 
-function externalWaitFromDescription(
+export function externalWaitFromDescription(
   description: string | null,
 ): { owner: string; action: string } | null {
   if (!description) return null;
@@ -5793,6 +5793,7 @@ async function listIssueBlockedInboxAttentionMap(
       executionState: issue.executionState,
       monitorNextCheckAt: issue.monitorNextCheckAt,
       monitorAttemptCount: issue.monitorAttemptCount,
+      unblockDescriptor: issue.unblockDescriptor,
     })),
     relations: graphRelations,
     agents: companyAgents,
@@ -5843,6 +5844,9 @@ async function listIssueBlockedInboxAttentionMap(
     pendingInteractions,
     pendingApprovals,
     openRecoveryIssues,
+    explicitWaitingPaths: graphIssues.flatMap((issue) => externalWaitFromDescription(issue.description)
+      ? [{ companyId: issue.companyId, issueId: issue.id, status: issue.status }]
+      : []),
     now: new Date(),
   });
   const findingByIssueId = new Map<string, IssueLivenessFinding>();
@@ -6067,6 +6071,8 @@ async function listIssueBlockedInboxAttentionMap(
           action: {
             label: (() => {
               switch (finding.state) {
+                case "blocked_without_dependency":
+                  return "Choose blocked path";
                 case "blocked_by_unassigned_issue":
                   return "Assign blocker";
                 case "blocked_by_assigned_backlog_issue":
