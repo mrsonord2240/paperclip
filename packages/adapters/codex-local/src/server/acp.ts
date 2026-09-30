@@ -225,6 +225,12 @@ async function prepareCodexRemoteManagedHome(
   env.CODEX_HOME =
     stagedRuntime.assetDirs.home ??
     path.posix.join(stagedRuntime.runtimeRootDir ?? "", "home");
+  // SQLite state follows the in-sandbox home unless the operator configured it.
+  const configuredSqliteHome = parseObject(input.config.env).CODEX_SQLITE_HOME;
+  env.CODEX_SQLITE_HOME =
+    typeof configuredSqliteHome === "string" && configuredSqliteHome.trim().length > 0
+      ? configuredSqliteHome.trim()
+      : env.CODEX_HOME;
 
   return {
     stagedRuntime,
