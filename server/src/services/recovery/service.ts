@@ -103,6 +103,7 @@ import {
   issueService,
   executeIssuePostCommitActions,
   type IssuePostCommitAction,
+  externalWaitFromDescription,
 } from "../issues.js";
 import {
   applyIssueMonitorPolicyTransition,
@@ -5524,6 +5525,412 @@ export function recoveryService(
     result.skipped += activeRecovery.skipped;
     result.issueIds.push(...activeRecovery.issueIds);
     result.issueIds = [...new Set(result.issueIds)];
+
+  async function collectIssueGraphLivenessFindings() {
+    const issueRowsPromise = Promise.resolve(db
+      .select({
+        id: issues.id,
+        companyId: issues.companyId,
+        identifier: issues.identifier,
+        title: issues.title,
+        description: issues.description,
+        status: issues.status,
+        projectId: issues.projectId,
+        goalId: issues.goalId,
+        parentId: issues.parentId,
+        assigneeAgentId: issues.assigneeAgentId,
+        assigneeUserId: issues.assigneeUserId,
+        createdByAgentId: issues.createdByAgentId,
+        createdByUserId: issues.createdByUserId,
+        executionPolicy: issues.executionPolicy,
+        executionState: issues.executionState,
+        monitorNextCheckAt: issues.monitorNextCheckAt,
+        monitorAttemptCount: issues.monitorAttemptCount,
+        unblockDescriptor: issues.unblockDescriptor,
+      })
+      .from(issues)
+      .where(
+        and(
+          visibleIssueCondition(),
+          notInArray(issues.originKind, [RECOVERY_ORIGIN_KINDS.issueGraphLivenessEscalation]),
+        ),
+      ));
+
+    const [
+      issueRows,
+      relationRows,
+      agentRows,
+      activeRunRows,
+      activeIssueRunRows,
+      wakeRows,
+      interactionRows,
+      approvalRows,
+      recoveryIssueRows,
+      recoveryActionRows,
+    ] = await Promise.all([
+      issueRowsPromise,
+      db
+        .select({
+          companyId: issueRelations.companyId,
+          blockerIssueId: issueRelations.issueId,
+          blockedIssueId: issueRelations.relatedIssueId,
+        })
+        .from(issueRelations)
+        .where(eq(issueRelations.type, "blocks")),
+      db
+        .select({
+          id: agents.id,
+          companyId: agents.companyId,
+          name: agents.name,
+          role: agents.role,
+          title: agents.title,
+          status: agents.status,
+          reportsTo: agents.reportsTo,
+        })
+        .from(agents),
+      db
+        .select({
+          companyId: heartbeatRuns.companyId,
+          agentId: heartbeatRuns.agentId,
+          status: heartbeatRuns.status,
+          contextSnapshot: heartbeatRuns.contextSnapshot,
+        })
+        .from(heartbeatRuns)
+        .where(inArray(heartbeatRuns.status, [...EXECUTION_PATH_HEARTBEAT_RUN_STATUSES])),
+      db
+        .select({
+          companyId: issues.companyId,
+          agentId: heartbeatRuns.agentId,
+          status: heartbeatRuns.status,
+          issueId: issues.id,
+        })
+        .from(issues)
+        .innerJoin(heartbeatRuns, eq(issues.executionRunId, heartbeatRuns.id))
+        .where(
+          and(
+            visibleIssueCondition(),
+            notInArray(issues.originKind, [RECOVERY_ORIGIN_KINDS.issueGraphLivenessEscalation]),
+            inArray(heartbeatRuns.status, [...EXECUTION_PATH_HEARTBEAT_RUN_STATUSES]),
+          ),
+        ),
+      db
+        .select({
+          companyId: agentWakeupRequests.companyId,
+          agentId: agentWakeupRequests.agentId,
+          status: agentWakeupRequests.status,
+          payload: agentWakeupRequests.payload,
+        })
+        .from(agentWakeupRequests)
+        .where(inArray(agentWakeupRequests.status, ["queued", "deferred_issue_execution"])),
+      db
+        .select({
+          companyId: issueThreadInteractions.companyId,
+          issueId: issueThreadInteractions.issueId,
+          status: issueThreadInteractions.status,
+        })
+        .from(issueThreadInteractions)
+        .where(eq(issueThreadInteractions.status, "pending")),
+      db
+        .select({
+          companyId: issueApprovals.companyId,
+          issueId: issueApprovals.issueId,
+          status: approvals.status,
+        })
+        .from(issueApprovals)
+        .innerJoin(approvals, eq(issueApprovals.approvalId, approvals.id))
+        .where(inArray(approvals.status, ["pending", "revision_requested"])),
+      db
+        .select({
+          companyId: issues.companyId,
+          id: issues.id,
+          status: issues.status,
+          originKind: issues.originKind,
+          originId: issues.originId,
+        })
+        .from(issues)
+        .where(
+          and(
+            visibleIssueCondition(),
+            inArray(issues.originKind, [
+              STRANDED_ISSUE_RECOVERY_ORIGIN_KIND,
+              RECOVERY_ORIGIN_KINDS.issueGraphLivenessEscalation,
+            ]),
+            notInArray(issues.status, ["done", "cancelled"]),
+          ),
+        ),
+      issueRowsPromise.then((rows) => {
+        const issueIdsUnderAnalysis = rows.map((row) => row.id);
+        return issueIdsUnderAnalysis.length === 0
+          ? []
+          : db
+            .select({
+              companyId: issueRecoveryActions.companyId,
+              issueId: issueRecoveryActions.sourceIssueId,
+              status: issueRecoveryActions.status,
+            })
+            .from(issueRecoveryActions)
+            .where(
+              and(
+                inArray(issueRecoveryActions.status, ["active", "escalated"]),
+                inArray(issueRecoveryActions.sourceIssueId, issueIdsUnderAnalysis),
+              ),
+            );
+      }),
+    ]);
+
+    const openRecoveryIssues = recoveryIssueRows.flatMap((row) => {
+      if (row.originKind === RECOVERY_ORIGIN_KINDS.issueGraphLivenessEscalation) {
+        const parsed = parseIssueGraphLivenessIncidentKey(row.originId);
+        if (!parsed || parsed.companyId !== row.companyId) return [];
+        return [
+          {
+            companyId: row.companyId,
+            issueId: parsed.issueId,
+            status: row.status,
+          },
+          {
+            companyId: row.companyId,
+            issueId: parsed.leafIssueId,
+            status: row.status,
+          },
+        ];
+      }
+
+      const issueId = readNonEmptyString(row.originId);
+      if (!issueId) return [];
+      return [{
+        companyId: row.companyId,
+        issueId,
+        status: row.status,
+      }];
+    });
+
+    return classifyIssueGraphLiveness({
+      issues: issueRows,
+      relations: relationRows,
+      agents: agentRows,
+      activeRuns: activeRunRows.map((row) => ({
+        companyId: row.companyId,
+        agentId: row.agentId,
+        status: row.status,
+        issueId: issueIdFromRunContext(row.contextSnapshot),
+      })).concat(activeIssueRunRows.map((row) => ({
+        companyId: row.companyId,
+        agentId: row.agentId,
+        status: row.status,
+        issueId: row.issueId,
+      }))),
+      queuedWakeRequests: wakeRows.map((row) => ({
+        companyId: row.companyId,
+        agentId: row.agentId,
+        status: row.status,
+        issueId: issueIdFromWakePayload(row.payload),
+      })),
+      pendingInteractions: interactionRows,
+      pendingApprovals: approvalRows,
+      openRecoveryIssues: openRecoveryIssues.concat(recoveryActionRows),
+      explicitWaitingPaths: issueRows.flatMap((issue) => externalWaitFromDescription(issue.description)
+        ? [{ companyId: issue.companyId, issueId: issue.id, status: issue.status }]
+        : []),
+      now: new Date(),
+    });
+  }
+
+  async function findOpenLivenessEscalation(companyId: string, incidentKey: string) {
+    return db
+      .select()
+      .from(issues)
+      .where(
+        and(
+          eq(issues.companyId, companyId),
+          eq(issues.originKind, RECOVERY_ORIGIN_KINDS.issueGraphLivenessEscalation),
+          eq(issues.originId, incidentKey),
+          visibleIssueCondition(),
+          notInArray(issues.status, ["done", "cancelled"]),
+        ),
+      )
+      .limit(1)
+      .then((rows) => rows[0] ?? null);
+  }
+
+  async function findOpenLivenessRecoveryIssueForLeaf(finding: IssueLivenessFinding) {
+    const byFingerprint = await db
+      .select()
+      .from(issues)
+      .where(
+        and(
+          eq(issues.companyId, finding.companyId),
+          eq(issues.originKind, RECOVERY_ORIGIN_KINDS.issueGraphLivenessEscalation),
+          eq(issues.originFingerprint, livenessRecoveryLeafFingerprint(finding)),
+          visibleIssueCondition(),
+          notInArray(issues.status, ["done", "cancelled"]),
+        ),
+      )
+      .limit(1)
+      .then((rows) => rows[0] ?? null);
+    if (byFingerprint) return byFingerprint;
+
+    const leafIssueId = livenessRecoveryLeafIssueId(finding);
+    const openRecoveries = await db
+      .select()
+      .from(issues)
+      .where(
+        and(
+          eq(issues.companyId, finding.companyId),
+          eq(issues.originKind, RECOVERY_ORIGIN_KINDS.issueGraphLivenessEscalation),
+          visibleIssueCondition(),
+          notInArray(issues.status, ["done", "cancelled"]),
+        ),
+      );
+    return openRecoveries.find((row) => {
+      const parsed = parseLivenessIncidentKey(row.originId);
+      return parsed?.state === finding.state && parsed.leafIssueId === leafIssueId;
+    }) ?? null;
+  }
+
+  async function findRecentCompletedLivenessRecoveryIssue(
+    finding: IssueLivenessFinding,
+    now: Date,
+    cooldownMs: number,
+  ) {
+    if (cooldownMs <= 0) return null;
+    const cutoff = new Date(now.getTime() - cooldownMs);
+    return db
+      .select({ id: issues.id })
+      .from(issues)
+      .where(
+        and(
+          eq(issues.companyId, finding.companyId),
+          eq(issues.originKind, RECOVERY_ORIGIN_KINDS.issueGraphLivenessEscalation),
+          or(
+            eq(issues.originId, finding.incidentKey),
+            eq(issues.originFingerprint, livenessRecoveryLeafFingerprint(finding)),
+          ),
+          visibleIssueCondition(),
+          eq(issues.status, "done"),
+          gte(issues.updatedAt, cutoff),
+        ),
+      )
+      .orderBy(desc(issues.updatedAt), desc(issues.id))
+      .limit(1)
+      .then((rows) => rows[0] ?? null);
+  }
+
+  async function removeRecoveryBlockerFromSource(recovery: typeof issues.$inferSelect) {
+    const parsed = parseLivenessIncidentKey(recovery.originId);
+    if (!parsed) return false;
+    const sourceIssue = await db
+      .select()
+      .from(issues)
+      .where(and(eq(issues.companyId, recovery.companyId), eq(issues.id, parsed.issueId)))
+      .then((rows) => rows[0] ?? null);
+    if (!sourceIssue) return false;
+
+    const blockerIds = await existingBlockerIssueIds(sourceIssue.companyId, sourceIssue.id);
+    if (!blockerIds.includes(recovery.id)) return false;
+    await issuesSvc.update(sourceIssue.id, {
+      blockedByIssueIds: blockerIds.filter((blockerId) => blockerId !== recovery.id),
+    });
+    return true;
+  }
+
+  async function hasActiveRunForIssueId(companyId: string, issueId: string) {
+    const [contextRun, issueRun] = await Promise.all([
+      db
+        .select({ id: heartbeatRuns.id })
+        .from(heartbeatRuns)
+        .where(
+          and(
+            eq(heartbeatRuns.companyId, companyId),
+            inArray(heartbeatRuns.status, [...EXECUTION_PATH_HEARTBEAT_RUN_STATUSES]),
+            sql`(${heartbeatRuns.contextSnapshot}->>'issueId' = ${issueId}
+              OR ${heartbeatRuns.contextSnapshot}->>'taskId' = ${issueId})`,
+          ),
+        )
+        .limit(1)
+        .then((rows) => rows[0] ?? null),
+      db
+        .select({ id: heartbeatRuns.id })
+        .from(issues)
+        .innerJoin(heartbeatRuns, eq(issues.executionRunId, heartbeatRuns.id))
+        .where(
+          and(
+            eq(issues.companyId, companyId),
+            eq(issues.id, issueId),
+            inArray(heartbeatRuns.status, [...EXECUTION_PATH_HEARTBEAT_RUN_STATUSES]),
+          ),
+        )
+        .limit(1)
+        .then((rows) => rows[0] ?? null),
+    ]);
+    return Boolean(contextRun || issueRun);
+  }
+
+  async function retireObsoleteLivenessRecoveryIssues(findings: IssueLivenessFinding[]) {
+    const currentIncidentKeys = new Set(findings.map((finding) => finding.incidentKey));
+    const currentLeafKeys = new Set(
+      findings.map((finding) =>
+        livenessRecoveryLeafKey(
+          finding.companyId,
+          finding.state,
+          livenessRecoveryLeafIssueId(finding),
+        ),
+      ),
+    );
+    const openRecoveries = await db
+      .select()
+      .from(issues)
+      .where(
+        and(
+          eq(issues.originKind, RECOVERY_ORIGIN_KINDS.issueGraphLivenessEscalation),
+          visibleIssueCondition(),
+          notInArray(issues.status, ["done", "cancelled"]),
+        ),
+      );
+    const result = {
+      retired: 0,
+      activeSkipped: 0,
+      blockerRelationsRemoved: 0,
+      retiredIssueIds: [] as string[],
+    };
+
+    for (const recovery of openRecoveries) {
+      if (recovery.originId && currentIncidentKeys.has(recovery.originId)) continue;
+      const parsed = parseLivenessIncidentKey(recovery.originId);
+      if (!parsed) continue;
+      if (
+        currentLeafKeys.has(
+          livenessRecoveryLeafKey(parsed.companyId, parsed.state, parsed.leafIssueId),
+        )
+      ) {
+        continue;
+      }
+      const sourceIssue = await db
+        .select({
+          id: issues.id,
+          status: issues.status,
+        })
+        .from(issues)
+        .where(and(eq(issues.companyId, parsed.companyId), eq(issues.id, parsed.issueId)))
+        .then((rows) => rows[0] ?? null);
+      if (sourceIssue && !["done", "cancelled"].includes(sourceIssue.status)) {
+        const blockerIds = await existingBlockerIssueIds(parsed.companyId, sourceIssue.id);
+        if (blockerIds.includes(recovery.id)) {
+          result.activeSkipped += 1;
+          continue;
+        }
+      }
+      if (await removeRecoveryBlockerFromSource(recovery)) {
+        result.blockerRelationsRemoved += 1;
+      }
+      if (await hasActiveRunForIssueId(recovery.companyId, recovery.id)) {
+        result.activeSkipped += 1;
+        continue;
+      }
+      await issuesSvc.update(recovery.id, { status: "cancelled" });
+      result.retired += 1;
+      result.retiredIssueIds.push(recovery.id);
+    }
 
     return result;
   }
