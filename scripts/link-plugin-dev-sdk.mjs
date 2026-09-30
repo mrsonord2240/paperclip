@@ -16,6 +16,13 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(__dirname, "..");
 const sdkDir = join(repoRoot, "packages", "plugins", "sdk");
 
+// Windows refuses a directory symlink unless the process holds
+// SeCreateSymbolicLinkPrivilege (Administrator, or Developer Mode enabled), so a
+// plain `pnpm install` fails the root postinstall with EPERM on an ordinary user
+// account. A junction needs no privilege and resolves identically for module
+// lookup, but it only accepts an ABSOLUTE target — hence the two link shapes.
+const linkKind = process.platform === "win32" ? "junction" : "dir";
+
 // Plugin packages excluded from the workspace that still need @paperclipai/plugin-sdk
 // linked in for local dev. Keep in sync with pnpm-workspace.yaml exclusions.
 function excludedPluginDirs() {
@@ -72,13 +79,16 @@ export function linkSdkInto(packageDir) {
   const scopeDir = join(packageDir, "node_modules", "@paperclipai");
   const linkTarget = join(scopeDir, "plugin-sdk");
   const relativeSdkDir = relative(scopeDir, sdkDir);
+  const linkValue = linkKind === "junction" ? sdkDir : relativeSdkDir;
 
   mkdirSync(scopeDir, { recursive: true });
 
   try {
     const stat = lstatSync(linkTarget);
     if (stat.isSymbolicLink()) {
-      if (readlinkSync(linkTarget) === relativeSdkDir) {
+      // Compare resolved, not literal: a junction reads back as an absolute path
+      // even though the POSIX link is written relative to scopeDir.
+      if (resolve(scopeDir, readlinkSync(linkTarget)) === resolve(sdkDir)) {
         // Already linked to the in-repo SDK; nothing to do.
         return false;
       }
@@ -93,6 +103,6 @@ export function linkSdkInto(packageDir) {
     if (error?.code !== "ENOENT") throw error;
   }
 
-  symlinkSync(relativeSdkDir, linkTarget, "dir");
+  symlinkSync(linkValue, linkTarget, linkKind);
   return true;
 }
