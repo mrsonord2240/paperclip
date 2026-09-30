@@ -58,6 +58,7 @@ export const issueBlockedInboxSeveritySchema = z.enum([
 ]);
 
 export const issueBlockedInboxReasonSchema = z.enum([
+  "blocked_without_dependency",
   "blocked_by_unassigned_issue",
   "blocked_by_assigned_backlog_issue",
   "blocked_by_uninvokable_assignee",
