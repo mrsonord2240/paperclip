@@ -73,6 +73,7 @@ vi.mock("@paperclipai/adapter-utils/execution-target", async () => {
   };
 });
 
+import { createPromptContextFixture } from "@paperclipai/adapter-utils/test-fixtures/prompt-context";
 import { execute } from "./execute.js";
 
 describe("codex remote execution", () => {
@@ -116,6 +117,7 @@ describe("codex remote execution", () => {
         taskKey: null,
       },
       config: {
+        engine: "cli",
         command: "codex",
         env: {
           CODEX_HOME: codexHomeDir,
@@ -280,6 +282,7 @@ describe("codex remote execution", () => {
         taskKey: null,
       },
       config: {
+        engine: "cli",
         command: "codex",
         env: {
           CODEX_HOME: codexHomeDir,
@@ -361,6 +364,7 @@ describe("codex remote execution", () => {
         taskKey: null,
       },
       config: {
+        engine: "cli",
         command: "codex",
         env: {
           CODEX_HOME: codexHomeDir,
@@ -392,6 +396,7 @@ describe("codex remote execution", () => {
     expect(call?.[2]).toEqual([
       "exec",
       "--json",
+      "--dangerously-bypass-approvals-and-sandbox",
       "-",
     ]);
   });
@@ -432,6 +437,7 @@ describe("codex remote execution", () => {
         taskKey: null,
       },
       config: {
+        engine: "cli",
         command: "codex",
         env: {
           CODEX_HOME: codexHomeDir,
@@ -463,6 +469,7 @@ describe("codex remote execution", () => {
     expect(call?.[2]).toEqual([
       "exec",
       "--json",
+      "--dangerously-bypass-approvals-and-sandbox",
       "resume",
       "session-123",
       "-",
@@ -505,6 +512,7 @@ describe("codex remote execution", () => {
         taskKey: null,
       },
       config: {
+        engine: "cli",
         command: "codex",
         env: {
           CODEX_HOME: codexHomeDir,
@@ -542,6 +550,7 @@ describe("codex remote execution", () => {
     expect(call?.[2]).toEqual([
       "exec",
       "--json",
+      "--dangerously-bypass-approvals-and-sandbox",
       "resume",
       "session-123",
       "-",
@@ -571,6 +580,7 @@ describe("codex remote execution", () => {
       },
       runtime: { sessionId: null, sessionParams: null, sessionDisplayId: null, taskKey: null },
       config: {
+        engine: "cli",
         command: "codex",
         // A host SQLite path does not exist remotely; the staged home must win.
         env: { CODEX_HOME: codexHomeDir, CODEX_SQLITE_HOME: path.join(rootDir, "host-sqlite") },
@@ -624,4 +634,73 @@ describe("codex remote execution", () => {
     expect(call?.[3].env.CODEX_SQLITE_HOME).toBe("/app/.paperclip-runtime/codex/home");
     expect(call?.[3].remoteExecution?.remoteCwd).toBe("/app");
   });
+
+  it("reselects the full assignment and bootstrap guidance after a failed resume", async () => {
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-codex-cli-fallback-context-"));
+    cleanupDirs.push(rootDir);
+    const workspaceDir = path.join(rootDir, "workspace");
+    await mkdir(workspaceDir, { recursive: true });
+
+    runChildProcess
+      .mockResolvedValueOnce({
+        exitCode: 1,
+        signal: null,
+        timedOut: false,
+        stdout: "",
+        stderr: "unknown thread id session-old",
+        pid: 123,
+        startedAt: new Date().toISOString(),
+      })
+      .mockResolvedValueOnce({
+        exitCode: 0,
+        signal: null,
+        timedOut: false,
+        stdout: [
+          JSON.stringify({ type: "thread.started", thread_id: "session-fresh" }),
+          JSON.stringify({ type: "turn.completed", usage: { input_tokens: 1, output_tokens: 1 } }),
+        ].join("\\n"),
+        stderr: "",
+        pid: 124,
+        startedAt: new Date().toISOString(),
+      });
+
+    await execute({
+      runId: "run-codex-cli-fallback-context",
+      agent: {
+        id: "agent-1",
+        companyId: "company-1",
+        name: "Codex Coder",
+        adapterType: "codex_local",
+        adapterConfig: {},
+      },
+      runtime: {
+        sessionId: "session-old",
+        sessionParams: { sessionId: "session-old", cwd: workspaceDir },
+        sessionDisplayId: "session-old",
+        taskKey: null,
+      },
+      config: {
+        engine: "cli",
+        command: "codex",
+        env: { OPENAI_API_KEY: "fixture-openai-key" },
+      },
+      context: {
+        ...createPromptContextFixture(),
+        paperclipWorkspace: { cwd: workspaceDir, source: "project_primary" },
+      },
+      onLog: async () => {},
+    });
+
+    expect(runChildProcess).toHaveBeenCalledTimes(2);
+    const first = (runChildProcess.mock.calls[0] as unknown as [string, string, string[], { stdin?: string }])[3]?.stdin ?? "";
+    const retry = (runChildProcess.mock.calls[1] as unknown as [string, string, string[], { stdin?: string }])[3]?.stdin ?? "";
+    expect(first).toContain("## Compact assignment");
+    expect(first).not.toContain("Explain the next step before starting work.");
+    expect(retry).toContain("## Owned assignment");
+    expect(retry).toContain("Explain the next step before starting work.");
+    expect(retry).not.toContain("## Compact assignment");
+    expect(retry.indexOf("comment-first")).toBeLessThan(retry.indexOf("comment-second"));
+    expect(retry.split("Append the same ledger entry.")).toHaveLength(3);
+  });
+
 });
